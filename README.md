@@ -22,6 +22,7 @@ intelligently crops them to standard aspect ratios.
 - 🔧 **Flexible Input**: Supports URLs, bytes, and PIL Images as input
 - ⚡ **Fast Processing**: Efficient image processing with OpenCV
 - 🐍 **Pure Python**: Easy to integrate into any Python project
+- 🔄 **Multiple request modes**: Polling, webhook, single
 
 ## Installation
 
@@ -33,113 +34,147 @@ pip install smart-image-cropper
 
 ```python
 from smart_image_cropper import SmartImageCropper
-from PIL import Image
 
 # Initialize the cropper with your API credentials
 cropper = SmartImageCropper(
     api_url="your-api-endpoint",
     api_key="your-api-key"
 )
+```
 
-# Method 1: Process from URL
-result_bytes = cropper.process_image("https://example.com/image.jpg")
+### Getting Bounding Boxes
 
-# Method 2: Process from bytes
-with open("image.jpg", "rb") as f:
-    image_bytes = f.read()
-result_bytes = cropper.process_image(image_bytes)
+The library supports three modes for getting bounding boxes:
 
-# Method 3: Process from PIL Image
-pil_image = Image.open("image.jpg")
-result_bytes = cropper.process_image(pil_image)
+1. **Polling** (default mode):
+
+```python
+# Automatically waits for job completion
+bboxes = cropper.get_bounding_boxes(image_input, mode="polling")
+```
+
+2. **Webhook**:
+
+```python
+# Sends request and returns job ID
+job_id = cropper.get_bounding_boxes(
+    image_input,
+    mode="webhook",
+    webhook_url="https://your-webhook.com"
+)
+
+# The webhook will receive results when the job is completed
+# The webhook payload will contain bounding boxes in the format:
+# {
+#     "delayTime": 1000,
+#     "executionTime": 1000,
+#     "input": {
+#         "image": "image_bytes",
+#     },
+#     "id": "job_123",
+#      "input": {
+#         "image": "image_bytes",
+#     },
+#     "status": "COMPLETED",
+#     "output": [
+#         {"x1": 0, "y1": 0, "x2": 100, "y2": 100},
+#         ...
+#     ],
+#     "webhook": "https://your-webhook.com"
+# }
+```
+
+3. **Single Request**:
+
+```python
+# Only sends the request without waiting for results
+cropper.get_bounding_boxes(image_input, mode="single")
+```
+
+### Creating a Collage
+
+```python
+# After getting bounding boxes
+collage = cropper.create_collage(image_input, bboxes)
+```
+
+## Examples
+
+### Complete Example with Polling
+
+```python
+from smart_image_cropper import SmartImageCropper
+from PIL import Image
+
+# Initialize the cropper
+cropper = SmartImageCropper("https://api.example.com/detect", "your_api_key")
+
+# Load the image
+image = Image.open("example.jpg")
+
+# Get bounding boxes (polling mode)
+bboxes = cropper.get_bounding_boxes(image)
+
+# Create the collage
+result = cropper.create_collage(image, bboxes)
 
 # Save the result
-with open("cropped_result.jpg", "wb") as f:
-    f.write(result_bytes)
+with open("result.jpg", "wb") as f:
+    f.write(result)
 ```
+
+### Webhook Example with Flask
+
+```python
+from smart_image_cropper import SmartImageCropper
+from flask import Flask, request
+
+app = Flask(__name__)
+cropper = SmartImageCropper("https://api.example.com/detect", "your_api_key")
+
+@app.route("/process", methods=["POST"])
+def process_image():
+    image = request.files["image"]
+    job_id = cropper.get_bounding_boxes(
+        image.read(),
+        mode="webhook",
+        webhook_url="https://your-server.com/webhook"
+    )
+    return {"job_id": job_id}
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
+    if data["status"] == "COMPLETED":
+        bboxes = data["output"]
+        # Process bounding boxes as needed
+    return {"status": "ok"}
+```
+
+## Notes
+
+- Polling mode is the simplest to use but may block execution for a while
+- Webhook mode is ideal for asynchronous applications or web servers
+- Single mode is useful when you just want to send the request without waiting
+  for results
 
 ## How It Works
 
-1. **Object Detection**: The library sends your image to an AI-powered bounding
-   box detection API
-2. **Smart Selection**: Identifies the most important objects based on size and
-   relevance
-3. **Intelligent Processing**:
-   - **Single Object**: Crops and expands to the nearest standard aspect ratio
-   - **Multiple Objects**: Creates a collage with optimal layout
-     (vertical/horizontal)
-4. **Aspect Ratio Optimization**: Ensures the final result matches standard
-   social media formats
+1. The library sends the image to an AI-powered API for object detection
+2. The API returns bounding boxes for detected objects
+3. The library selects the best bounding boxes based on size and position
+4. The image is cropped or a collage is created based on the selected boxes
+5. The result is returned as image bytes
 
-## Supported Aspect Ratios
+## Installation
 
-- **Portrait 4:5** (0.8) - Instagram posts
-- **Portrait 3:4** (0.75) - Traditional photo format
-- **Square 1:1** (1.0) - Instagram square posts
-- **Landscape 4:3** (1.33) - Traditional landscape format
-
-## API Requirements
-
-This library requires access to a bounding box detection API. The API should:
-
-- Accept POST requests with JSON payload containing base64-encoded images
-- Return a job ID for asynchronous processing
-- Provide a status endpoint to check job completion
-- Return bounding box coordinates in the format:
-  `{"x1": int, "y1": int, "x2": int, "y2": int}`
-
-### Example API Integration
-
-```python
-# Your API should accept this format:
-{
-    "input": {
-        "image": "base64-encoded-image-string"
-    }
-}
-
-# And return:
-{
-    "id": "job-id-string"
-}
-
-# Status check should return:
-{
-    "status": "COMPLETED",  # or "FAILED"
-    "output": [
-        {"x1": 100, "y1": 50, "x2": 300, "y2": 250},
-        {"x1": 400, "y1": 100, "x2": 600, "y2": 300}
-    ]
-}
+```bash
+pip install smart-image-cropper
 ```
 
-## Advanced Usage
+## License
 
-### Error Handling
-
-```python
-from smart_image_cropper import SmartImageCropper, SmartCropperError, APIError
-
-try:
-    cropper = SmartImageCropper(api_url="...", api_key="...")
-    result = cropper.process_image("image.jpg")
-except APIError as e:
-    print(f"API Error: {e}")
-except SmartCropperError as e:
-    print(f"Processing Error: {e}")
-```
-
-### Logging
-
-The library uses Python's logging module. Enable debug logging to see detailed
-processing information:
-
-```python
-import logging
-
-logging.basicConfig(level=logging.INFO)
-# Now you'll see detailed processing logs
-```
+MIT
 
 ## Dependencies
 

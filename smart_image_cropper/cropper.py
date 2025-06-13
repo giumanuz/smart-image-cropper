@@ -463,19 +463,49 @@ class BoundingBoxAPIClient:
             for bbox in bboxes_data
         ]
 
-    def get_bounding_boxes(self, image_bytes: bytes) -> List[BoundingBox]:
-        """Get the bounding boxes for the given image."""
-        logger.info("Requesting bboxes from API")
+    def get_bounding_boxes(self, image_bytes: bytes, mode: str = "polling", webhook_url: Optional[str] = None) -> Union[List[BoundingBox], str, None]:
+        """
+        Get the bounding boxes for the given image.
+
+        Args:
+            image_bytes: The image bytes to process
+            mode: One of "polling", "webhook", or "single"
+            webhook_url: Required if mode is "webhook"
+
+        Returns:
+            - If mode is "polling": List of BoundingBox objects
+            - If mode is "webhook": Job ID string
+            - If mode is "single": None (just sends the request)
+
+        Raises:
+            ValueError: If mode is invalid or webhook_url is missing when required
+        """
+        if mode not in ["polling", "webhook", "single"]:
+            raise ValueError("Mode must be one of: polling, webhook, single")
+
+        if mode == "webhook" and not webhook_url:
+            raise ValueError("webhook_url is required when mode is 'webhook'")
+
+        logger.info(f"Requesting bboxes from API with mode: {mode}")
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
         try:
             payload = {"input": {"image": image_b64}}
+            if mode == "webhook":
+                payload["webhook"] = webhook_url
+
             response = requests.post(
                 self.api_url, json=payload, headers=self.headers)
             response.raise_for_status()
 
             job_id = response.json()["id"]
-            return self._wait_for_job_completion(job_id) or []
+
+            if mode == "webhook":
+                return job_id
+            elif mode == "polling":
+                return self._wait_for_job_completion(job_id) or []
+            else:  # single mode
+                return None
 
         except requests.RequestException as e:
             logger.error(f"API request failed: {str(e)}")
@@ -483,6 +513,34 @@ class BoundingBoxAPIClient:
         except Exception as e:
             logger.error(f"Unexpected error getting bounding boxes: {str(e)}")
             raise APIError(f"Unexpected API error: {str(e)}")
+
+    def get_job_status(self, job_id: str) -> Optional[List[BoundingBox]]:
+        """
+        Get the status of a job and return bounding boxes if completed.
+
+        Args:
+            job_id: The ID of the job to check
+
+        Returns:
+            List of BoundingBox objects if job is completed, None otherwise
+        """
+        status_url = f"{self.api_url.rsplit('/', 1)[0]}/status/{job_id}"
+
+        try:
+            response = requests.get(status_url, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+
+            if data["status"] == "COMPLETED":
+                return self._parse_bboxes(data["output"])
+            elif data["status"] == "FAILED":
+                logger.error(f"Job failed: {data}")
+                raise APIError(f"API job failed: {data}")
+            return None
+
+        except requests.RequestException as e:
+            logger.error(f"Error checking status: {str(e)}")
+            raise APIError(f"Error checking API status: {str(e)}")
 
 
 class SmartImageCropper:
@@ -498,6 +556,41 @@ class SmartImageCropper:
         """
         self.api_client = BoundingBoxAPIClient(api_url, api_key)
         logger.info("Initialized SmartImageCropper")
+
+    def get_bounding_boxes(self, image_input: Union[str, bytes, Image.Image], mode: str = "polling", webhook_url: Optional[str] = None) -> Union[List[BoundingBox], str, None]:
+        """
+        Get bounding boxes for an image.
+
+        Args:
+            image_input: Can be a URL string, image bytes, or PIL Image
+            mode: One of "polling", "webhook", or "single"
+            webhook_url: Required if mode is "webhook"
+
+        Returns:
+            - If mode is "polling": List of BoundingBox objects
+            - If mode is "webhook": Job ID string
+            - If mode is "single": None (just sends the request)
+
+        Raises:
+            ValueError: If mode is invalid or webhook_url is missing when required
+        """
+        image_bytes = ImageUtils.normalize_input(image_input)
+        return self.api_client.get_bounding_boxes(image_bytes, mode, webhook_url)
+
+    def create_collage(self, image_input: Union[str, bytes, Image.Image], bboxes: List[BoundingBox]) -> bytes:
+        """
+        Create a collage from an image and its bounding boxes.
+
+        Args:
+            image_input: Can be a URL string, image bytes, or PIL Image
+            bboxes: List of BoundingBox objects to process
+
+        Returns:
+            bytes: The processed image as bytes
+        """
+        image_bytes = ImageUtils.normalize_input(image_input)
+        best_bboxes = self._select_best_bboxes(bboxes)
+        return self._process_bboxes(image_bytes, best_bboxes)
 
     def _select_best_bboxes(self, bboxes: List[BoundingBox]) -> List[BoundingBox]:
         """Select the best bounding boxes for processing."""
@@ -520,36 +613,6 @@ class SmartImageCropper:
             return [bbox1]
 
         return [bbox1, bbox2]
-
-    def process_image(self, image_input: Union[str, bytes, Image.Image]) -> bytes:
-        """
-        Process an image and return the cropped result as bytes.
-
-        Args:
-            image_input: Can be a URL string, image bytes, or PIL Image
-
-        Returns:
-            bytes: The processed image as bytes
-
-        Raises:
-            SmartCropperError: If processing fails
-        """
-        # Normalize input to bytes
-        image_bytes = ImageUtils.normalize_input(image_input)
-
-        try:
-            bboxes = self.api_client.get_bounding_boxes(image_bytes)
-            if not bboxes:
-                logger.warning(
-                    "No bounding boxes found, returning original image")
-                return image_bytes
-            else:
-                best_bboxes = self._select_best_bboxes(bboxes)
-                return self._process_bboxes(image_bytes, best_bboxes)
-
-        except Exception as e:
-            logger.error(f"Error processing image: {str(e)}")
-            raise
 
     def _process_bboxes(self, image_bytes: bytes, bboxes: List[BoundingBox]) -> bytes:
         """Process the bounding boxes to create the final result."""
