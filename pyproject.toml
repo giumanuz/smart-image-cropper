@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-image-cropper"
-version = "1.0.0"
+version = "1.1.0"
 description = "An intelligent image cropping library that creates smart collages"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Giulio Manuzzi", email = "giuliomanuzzi@gmail.com"}
 ]
 maintainers = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Giulio Manuzzi", email = "giuliomanuzzi@gmail.com"}
 ]
 keywords = ["image processing", "cropping", "collage", "computer vision", "opencv"]
 classifiers = [
@@ -26,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Graphics",
     "Topic :: Scientific/Engineering :: Image Processing",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -47,10 +48,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/smart-image-cropper"
-Documentation = "https://github.com/yourusername/smart-image-cropper#readme"
-Repository = "https://github.com/yourusername/smart-image-cropper"
-"Bug Tracker" = "https://github.com/yourusername/smart-image-cropper/issues"
+Homepage = "https://github.com/giumanuz/smart-image-cropper"
+Documentation = "https://github.com/giumanuz/smart-image-cropper#readme"
+Repository = "https://github.com/giumanuz/smart-image-cropper"
+"Bug Tracker" = "https://github.com/giumanuz/smart-image-cropper/issues"
 
 [tool.setuptools]
 packages = ["smart_image_cropper"]
