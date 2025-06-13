@@ -1,10 +1,12 @@
 """Tests for cropper functionality."""
 
 import pytest
-import numpy as np
+from unittest.mock import Mock, patch
+from PIL import Image
 from smart_image_cropper.cropper import (
     BoundingBox, AspectRatio, AspectRatioCalculator,
-    CollageDirection, CollageDirectionDecider
+    CollageDirection, CollageDirectionDecider, SmartImageCropper,
+    BoundingBoxAPIClient
 )
 
 
@@ -128,3 +130,202 @@ class TestCollageDirectionDecider:
         bbox2 = BoundingBox(0, 0, 100, 200)
         direction = CollageDirectionDecider.decide_direction(bbox1, bbox2)
         assert direction == CollageDirection.HORIZONTAL
+
+
+@pytest.fixture
+def mock_api_client():
+    with patch('smart_image_cropper.cropper.BoundingBoxAPIClient') as mock:
+        api_client_instance = Mock()
+        mock.return_value = api_client_instance
+
+        # Store the return values for different modes
+        return_values = {
+            "polling": [BoundingBox(0, 0, 100, 100), BoundingBox(200, 200, 300, 300)],
+            "webhook": "job_123",
+            "single": None
+        }
+
+        # Mock the get_bounding_boxes method to handle validation and return values
+        def mock_get_bounding_boxes(image_bytes, mode, webhook_url=None):
+            if mode not in ["polling", "webhook", "single"]:
+                raise ValueError(
+                    "Mode must be one of: polling, webhook, single")
+            if mode == "webhook" and not webhook_url:
+                raise ValueError(
+                    "webhook_url is required when mode is 'webhook'")
+            return return_values.get(mode)
+
+        api_client_instance.get_bounding_boxes.side_effect = mock_get_bounding_boxes
+        yield api_client_instance
+
+
+@pytest.fixture
+def mock_image_utils():
+    with patch('smart_image_cropper.cropper.ImageUtils') as mock:
+        # Mock normalize_input to return the input bytes directly
+        mock.normalize_input.return_value = b"test_image"
+        # Mock validate_image_bytes to return True
+        mock.validate_image_bytes.return_value = True
+        yield mock
+
+
+@pytest.fixture
+def sample_image():
+    return Image.new('RGB', (100, 100))
+
+
+def test_get_bounding_boxes_polling_mode(mock_api_client, mock_image_utils):
+    """Test get_bounding_boxes in polling mode."""
+    cropper = SmartImageCropper("http://test.com", "test_key")
+    image_bytes = b"test_image"
+
+    # Execute
+    result = cropper.get_bounding_boxes(image_bytes, mode="polling")
+
+    # Assert
+    assert len(result) == 2
+    assert isinstance(result[0], BoundingBox)
+    mock_api_client.get_bounding_boxes.assert_called_once_with(
+        image_bytes, "polling", None
+    )
+    mock_image_utils.normalize_input.assert_called_once_with(image_bytes)
+
+
+def test_get_bounding_boxes_webhook_mode(mock_api_client, mock_image_utils):
+    """Test get_bounding_boxes in webhook mode."""
+    # Setup
+    mock_api_client.get_bounding_boxes.return_value = "job_123"
+
+    cropper = SmartImageCropper("http://test.com", "test_key")
+    image_bytes = b"test_image"
+    webhook_url = "https://test.com/webhook"
+
+    # Execute
+    result = cropper.get_bounding_boxes(
+        image_bytes,
+        mode="webhook",
+        webhook_url=webhook_url
+    )
+
+    # Assert
+    assert result == "job_123"
+    mock_api_client.get_bounding_boxes.assert_called_once_with(
+        image_bytes, "webhook", webhook_url
+    )
+    mock_image_utils.normalize_input.assert_called_once_with(image_bytes)
+
+
+def test_get_bounding_boxes_single_mode(mock_api_client, mock_image_utils):
+    """Test get_bounding_boxes in single mode."""
+    # Setup
+    mock_api_client.get_bounding_boxes.return_value = None
+
+    cropper = SmartImageCropper("http://test.com", "test_key")
+    image_bytes = b"test_image"
+
+    # Execute
+    result = cropper.get_bounding_boxes(image_bytes, mode="single")
+
+    # Assert
+    assert result is None
+    mock_api_client.get_bounding_boxes.assert_called_once_with(
+        image_bytes, "single", None
+    )
+    mock_image_utils.normalize_input.assert_called_once_with(image_bytes)
+
+
+def test_get_bounding_boxes_invalid_mode(mock_api_client, mock_image_utils):
+    """Test get_bounding_boxes with invalid mode."""
+    cropper = SmartImageCropper("http://test.com", "test_key")
+    image_bytes = b"test_image"
+
+    with pytest.raises(ValueError, match="Mode must be one of: polling, webhook, single"):
+        cropper.get_bounding_boxes(image_bytes, mode="invalid")
+
+    mock_image_utils.normalize_input.assert_called_once_with(image_bytes)
+
+
+def test_get_bounding_boxes_webhook_missing_url(mock_api_client, mock_image_utils):
+    """Test get_bounding_boxes in webhook mode without URL."""
+    cropper = SmartImageCropper("http://test.com", "test_key")
+    image_bytes = b"test_image"
+
+    with pytest.raises(ValueError, match="webhook_url is required when mode is 'webhook'"):
+        cropper.get_bounding_boxes(image_bytes, mode="webhook")
+
+    mock_image_utils.normalize_input.assert_called_once_with(image_bytes)
+
+
+def test_api_client_polling_mode():
+    """Test BoundingBoxAPIClient in polling mode."""
+    with patch('requests.post') as mock_post, \
+            patch('requests.get') as mock_get:
+
+        # Setup mock responses
+        mock_post.return_value.json.return_value = {"id": "job_123"}
+        mock_post.return_value.raise_for_status = Mock()
+
+        mock_get.return_value.json.side_effect = [
+            {"status": "IN_PROGRESS"},
+            {"status": "COMPLETED", "output": [
+                {"x1": 0, "y1": 0, "x2": 100, "y2": 100}
+            ]}
+        ]
+        mock_get.return_value.raise_for_status = Mock()
+
+        client = BoundingBoxAPIClient("http://test.com", "test_key")
+        result = client.get_bounding_boxes(b"test_image", mode="polling")
+
+        assert len(result) == 1
+        assert isinstance(result[0], BoundingBox)
+        assert mock_post.call_count == 1
+        assert mock_get.call_count == 2
+
+
+def test_api_client_webhook_mode():
+    """Test BoundingBoxAPIClient in webhook mode."""
+    with patch('requests.post') as mock_post:
+        # Setup mock response
+        mock_post.return_value.json.return_value = {"id": "job_123"}
+        mock_post.return_value.raise_for_status = Mock()
+
+        client = BoundingBoxAPIClient("http://test.com", "test_key")
+        result = client.get_bounding_boxes(
+            b"test_image",
+            mode="webhook",
+            webhook_url="https://test.com/webhook"
+        )
+
+        assert result == "job_123"
+        mock_post.assert_called_once()
+        payload = mock_post.call_args[1]['json']
+        assert "webhook" in payload
+        assert payload["webhook"] == "https://test.com/webhook"
+
+
+def test_api_client_single_mode():
+    """Test BoundingBoxAPIClient in single mode."""
+    with patch('requests.post') as mock_post:
+        # Setup mock response
+        mock_post.return_value.json.return_value = {"id": "job_123"}
+        mock_post.return_value.raise_for_status = Mock()
+
+        client = BoundingBoxAPIClient("http://test.com", "test_key")
+        result = client.get_bounding_boxes(b"test_image", mode="single")
+
+        assert result is None
+        mock_post.assert_called_once()
+        payload = mock_post.call_args[1]['json']
+        assert "webhook" not in payload
+
+
+def test_api_client_error_handling():
+    """Test BoundingBoxAPIClient error handling."""
+    with patch('requests.post') as mock_post:
+        # Setup mock to raise an exception
+        mock_post.side_effect = Exception("API Error")
+
+        client = BoundingBoxAPIClient("http://test.com", "test_key")
+
+        with pytest.raises(Exception, match="API Error"):
+            client.get_bounding_boxes(b"test_image")
