@@ -126,7 +126,7 @@ with open("result.jpg", "wb") as f:
 ### Webhook Example with Flask
 
 ```python
-from smart_image_cropper import SmartImageCropper
+from smart_image_cropper import SmartImageCropper, BoundingBox
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -142,13 +142,23 @@ def process_image():
     )
     return {"job_id": job_id}
 
-@app.route("/webhook", methods=["POST"])
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
-    if data["status"] == "COMPLETED":
-        bboxes = data["output"]
-        # Process bounding boxes as needed
-    return {"status": "ok"}
+    job_id = data.get('id')
+    if job_id and data.get('status') == 'COMPLETED':
+        # Parse bounding boxes from the webhook data
+        bboxes = [
+            BoundingBox(
+                x1=bbox['x1'],
+                y1=bbox['y1'],
+                x2=bbox['x2'],
+                y2=bbox['y2']
+            )
+            for bbox in data.get('output', [])
+        ]
+        webhook_results[job_id] = bboxes
+    return jsonify({'status': 'ok'})
 ```
 
 ## Notes
