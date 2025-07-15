@@ -11,7 +11,10 @@ import os
 import time
 from flask import Flask, request, jsonify
 from smart_image_cropper import SmartImageCropper, SmartCropperError
-from PIL import Image
+from smart_image_cropper.cropper import BoundingBox
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Initialize Flask app for webhook handling
 app = Flask(__name__)
@@ -50,11 +53,21 @@ def main():
 
         # Create collage from bounding boxes
         print("🎨 Creating collage...")
-        result_bytes = cropper.create_collage(image_bytes, bboxes)
+        result = cropper.create_collage(image_bytes, bboxes)
+
+        # Show information about the result
+        print(f"📊 Result info:")
+        print(f"   - Is collage: {result.is_collage}")
+        print(f"   - Number of images: {len(result.coordinates)}")
+
+        # Display coordinates of each image in the final result
+        for i, coord in enumerate(result.coordinates):
+            print(
+                f"   - Image {i+1}: x={coord.x}, y={coord.y}, w={coord.width}, h={coord.height}")
 
         # Save the result
         with open("result_polling.jpg", "wb") as f:
-            f.write(result_bytes)
+            f.write(result.image_bytes)
         print("✅ Saved result_polling.jpg")
 
     except SmartCropperError as e:
@@ -94,11 +107,21 @@ def main():
 
             # Create collage from bounding boxes
             print("🎨 Creating collage...")
-            result_bytes = cropper.create_collage(image_bytes, bboxes)
+            result = cropper.create_collage(image_bytes, bboxes)
+
+            # Show information about the result
+            print(f"📊 Result info:")
+            print(f"   - Is collage: {result.is_collage}")
+            print(f"   - Number of images: {len(result.coordinates)}")
+
+            # Display coordinates of each image in the final result
+            for i, coord in enumerate(result.coordinates):
+                print(
+                    f"   - Image {i+1}: x={coord.x}, y={coord.y}, w={coord.width}, h={coord.height}")
 
             # Save the result
             with open("result_webhook.jpg", "wb") as f:
-                f.write(result_bytes)
+                f.write(result.image_bytes)
             print("✅ Saved result_webhook.jpg")
         else:
             print("⚠️ No webhook callback received")
@@ -121,6 +144,13 @@ def main():
         status = cropper.api_client.get_job_status(job_id)
         if status:
             print(f"✅ Job completed with {len(status)} bounding boxes")
+
+            result = cropper.create_collage(image_bytes, status)
+            print(f"📊 Collage created with {len(result.coordinates)} images")
+
+            with open("result_single.jpg", "wb") as f:
+                f.write(result.image_bytes)
+
         else:
             print("⏳ Job still in progress")
 
@@ -128,6 +158,7 @@ def main():
         print(f"❌ Error in single mode: {e}")
 
     print("\n🎉 Examples completed! Check the output files.")
+    print("📄 Coordinate information is now included in the results!")
 
 # Webhook endpoint
 

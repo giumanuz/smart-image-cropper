@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -75,6 +75,24 @@ class BoundingBox:
             return "horizontal"
         else:
             return "vertical"
+
+
+@dataclass
+class ImageCoordinates:
+    """Coordinate information for an image in the final result."""
+    x: int
+    y: int
+    width: int
+    height: int
+    original_bbox: BoundingBox
+
+
+@dataclass
+class CropResult:
+    """Result of a cropping operation containing image bytes and coordinate information."""
+    image_bytes: bytes
+    coordinates: List[ImageCoordinates]
+    is_collage: bool = False
 
 
 class AspectRatioCalculator:
@@ -222,7 +240,7 @@ class ImageCropper:
     """Handles image cropping and manipulation."""
 
     @staticmethod
-    def crop_image(image_bytes: bytes, bbox: BoundingBox) -> bytes:
+    def crop_image(image_bytes: bytes, bbox: BoundingBox) -> CropResult:
         """Crop image based on bounding box."""
         try:
             nparr = np.frombuffer(image_bytes, np.uint8)
@@ -230,7 +248,21 @@ class ImageCropper:
 
             cropped = img[bbox.y1: bbox.y2, bbox.x1: bbox.x2]
             _, buffer = cv2.imencode(".jpg", cropped)
-            return buffer.tobytes()
+
+            # Create coordinate information for the single cropped image
+            coordinates = [ImageCoordinates(
+                x=0,
+                y=0,
+                width=bbox.width,
+                height=bbox.height,
+                original_bbox=bbox
+            )]
+
+            return CropResult(
+                image_bytes=buffer.tobytes(),
+                coordinates=coordinates,
+                is_collage=False
+            )
         except Exception as e:
             logger.error(f"Error cropping image: {str(e)}")
             raise ImageProcessingError(f"Error cropping image: {str(e)}")
@@ -367,7 +399,7 @@ class CollageCreator:
         bbox2: BoundingBox,
         direction: CollageDirection,
         target_ratio: AspectRatio,
-    ) -> bytes:
+    ) -> CropResult:
         """Create a collage from two bounding boxes."""
         try:
             nparr = np.frombuffer(image_bytes, np.uint8)
@@ -390,11 +422,50 @@ class CollageCreator:
             # Create collage
             if direction == CollageDirection.VERTICAL:
                 collage = np.vstack([crop1, crop2])
+                # Calculate coordinates in the final collage
+                coordinates = [
+                    ImageCoordinates(
+                        x=0,
+                        y=0,
+                        width=bbox1.width,
+                        height=bbox1.height,
+                        original_bbox=bbox1
+                    ),
+                    ImageCoordinates(
+                        x=0,
+                        y=bbox1.height,
+                        width=bbox2.width,
+                        height=bbox2.height,
+                        original_bbox=bbox2
+                    )
+                ]
             else:
                 collage = np.hstack([crop1, crop2])
+                # Calculate coordinates in the final collage
+                coordinates = [
+                    ImageCoordinates(
+                        x=0,
+                        y=0,
+                        width=bbox1.width,
+                        height=bbox1.height,
+                        original_bbox=bbox1
+                    ),
+                    ImageCoordinates(
+                        x=bbox1.width,
+                        y=0,
+                        width=bbox2.width,
+                        height=bbox2.height,
+                        original_bbox=bbox2
+                    )
+                ]
 
             _, buffer = cv2.imencode(".jpg", collage)
-            return buffer.tobytes()
+
+            return CropResult(
+                image_bytes=buffer.tobytes(),
+                coordinates=coordinates,
+                is_collage=True
+            )
 
         except Exception as e:
             logger.error(f"Error creating {direction.value} collage: {str(e)}")
@@ -490,8 +561,8 @@ class BoundingBoxAPIClient:
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
         try:
-            payload = {"input": {"image": image_b64}}
-            if mode == "webhook":
+            payload: Dict[str, Any] = {"input": {"image": image_b64}}
+            if mode == "webhook" and webhook_url:
                 payload["webhook"] = webhook_url
 
             response = requests.post(
@@ -577,7 +648,7 @@ class SmartImageCropper:
         image_bytes = ImageUtils.normalize_input(image_input)
         return self.api_client.get_bounding_boxes(image_bytes, mode, webhook_url)
 
-    def create_collage(self, image_input: Union[str, bytes, Image.Image], bboxes: List[BoundingBox]) -> bytes:
+    def create_collage(self, image_input: Union[str, bytes, Image.Image], bboxes: List[BoundingBox]) -> CropResult:
         """
         Create a collage from an image and its bounding boxes.
 
@@ -586,7 +657,7 @@ class SmartImageCropper:
             bboxes: List of BoundingBox objects to process
 
         Returns:
-            bytes: The processed image as bytes
+            CropResult: The processed image with coordinate information
         """
         image_bytes = ImageUtils.normalize_input(image_input)
         best_bboxes = self._select_best_bboxes(bboxes)
@@ -614,7 +685,7 @@ class SmartImageCropper:
 
         return [bbox1, bbox2]
 
-    def _process_bboxes(self, image_bytes: bytes, bboxes: List[BoundingBox]) -> bytes:
+    def _process_bboxes(self, image_bytes: bytes, bboxes: List[BoundingBox]) -> CropResult:
         """Process the bounding boxes to create the final result."""
         if len(bboxes) == 1:
             return self._process_single_bbox(image_bytes, bboxes[0])
@@ -623,9 +694,14 @@ class SmartImageCropper:
         else:
             logger.warning(
                 "Unexpected number of bboxes, returning original image")
-            return image_bytes
+            # Return original image with empty coordinates
+            return CropResult(
+                image_bytes=image_bytes,
+                coordinates=[],
+                is_collage=False
+            )
 
-    def _process_single_bbox(self, image_bytes: bytes, bbox: BoundingBox) -> bytes:
+    def _process_single_bbox(self, image_bytes: bytes, bbox: BoundingBox) -> CropResult:
         """Process a single bounding box."""
         logger.info("Single bbox detected, expanding to target aspect ratio")
 
@@ -643,7 +719,7 @@ class SmartImageCropper:
 
     def _process_multiple_bboxes(
         self, image_bytes: bytes, bbox1: BoundingBox, bbox2: BoundingBox
-    ) -> bytes:
+    ) -> CropResult:
         """Process two bounding boxes to create a collage."""
         direction = CollageDirectionDecider.decide_direction(bbox1, bbox2)
         logger.info(f"Creating {direction.value} collage")
