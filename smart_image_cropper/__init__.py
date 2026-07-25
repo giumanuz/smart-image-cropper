@@ -1,14 +1,19 @@
 """Smart Image Cropper - An intelligent image cropping library."""
 
-from .cropper import (
+from .cropper import SmartImageCropper
+from .exceptions import APIError, ImageProcessingError, SmartCropperError
+from .platform import (
     PLATFORM_HORIZONTAL,
     PLATFORM_VERTICAL,
+    PhotoTarget,
+    PlatformFitInfo,
     PlatformTarget,
-    SmartImageCropper,
+    Size,
+    resolve_photo_target,
+    select_platform_target,
 )
-from .exceptions import SmartCropperError, APIError, ImageProcessingError
 
-__version__ = "1.3.0"
+__version__ = "1.4.1"
 __author__ = "Giulio Manuzzi"
 __email__ = "giuliomanuzzi@gmail.com"
 
@@ -20,4 +25,9 @@ __all__ = [
     "PlatformTarget",
     "PLATFORM_HORIZONTAL",
     "PLATFORM_VERTICAL",
+    "Size",
+    "PhotoTarget",
+    "PlatformFitInfo",
+    "select_platform_target",
+    "resolve_photo_target",
 ]

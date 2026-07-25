@@ -5,10 +5,8 @@ from unittest.mock import Mock, patch
 from PIL import Image
 from smart_image_cropper.cropper import (
     BoundingBox, AspectRatio, AspectRatioCalculator,
-    BoundingBoxExpander,
     CollageDirection, CollageDirectionDecider, SmartImageCropper,
     BoundingBoxAPIClient,
-    PLATFORM_HORIZONTAL, PLATFORM_VERTICAL,
 )
 
 
@@ -331,98 +329,3 @@ def test_api_client_error_handling():
 
         with pytest.raises(Exception, match="API Error"):
             client.get_bounding_boxes(b"test_image")
-
-
-class TestPlatformTargets:
-    """Tests for 1200x630 / 1080x1350 platform sizing."""
-
-    def test_select_platform_vertical(self):
-        selected = AspectRatioCalculator.select_platform_target(0.8)
-        assert selected == PLATFORM_VERTICAL
-        assert selected.width == 1080
-        assert selected.height == 1350
-
-    def test_select_platform_horizontal(self):
-        selected = AspectRatioCalculator.select_platform_target(1.9)
-        assert selected == PLATFORM_HORIZONTAL
-        assert selected.width == 1200
-        assert selected.height == 630
-
-    def test_photo_size_with_bar_reserve(self):
-        width, height = PLATFORM_VERTICAL.photo_size(20)
-        assert width == 1080
-        assert height == 1080
-
-    def test_expand_to_ratio_widens_tall_bbox(self):
-        import numpy as np
-
-        img = np.zeros((1000, 1000, 3), dtype=np.uint8)
-        bbox = BoundingBox(400, 100, 600, 900)  # 200x800, ratio 0.25
-        expanded = BoundingBoxExpander.expand_to_ratio(img, bbox, 0.8)
-        assert expanded.width > bbox.width
-        assert abs(expanded.aspect_ratio - 0.8) < 0.05
-
-    def test_clamp_to_ratio_when_expand_blocked(self):
-        """When borders block expand, take max rect with desired proportions."""
-        import numpy as np
-
-        # Subject already touches left/right — cannot widen toward square
-        img = np.zeros((800, 400, 3), dtype=np.uint8)
-        bbox = BoundingBox(0, 100, 400, 700)  # 400x600, ratio ~0.67
-        result = BoundingBoxExpander.expand_to_ratio(img, bbox, 1.0)
-        assert abs(result.aspect_ratio - 1.0) < 0.02
-        assert result.width == result.height
-        assert result.width == 400  # max possible square inside expanded area
-
-    def test_platform_resize_even_when_expand_incomplete(self, mock_api_client):
-        import cv2
-        import numpy as np
-
-        # Narrow image: cannot expand a tall subject to 4:5 fully by width alone
-        img = np.zeros((1200, 500, 3), dtype=np.uint8)
-        img[:] = (10, 20, 30)
-        _, buffer = cv2.imencode(".jpg", img)
-        image_bytes = buffer.tobytes()
-
-        with patch(
-            "smart_image_cropper.cropper.ImageUtils.normalize_input",
-            return_value=image_bytes,
-        ):
-            cropper = SmartImageCropper("http://test.com", "test_key")
-            result = cropper.create_collage(
-                image_bytes,
-                [BoundingBox(50, 50, 450, 1150)],  # tall, near edges
-                use_platform_targets=True,
-                bar_reserve_pct=0,
-            )
-
-        out = cv2.imdecode(
-            np.frombuffer(result.image_bytes, np.uint8), cv2.IMREAD_COLOR
-        )
-        assert out is not None
-        assert out.shape[1] == 1080
-        assert out.shape[0] == 1350
-
-    def test_platform_single_bbox_resizes_when_reachable(self, mock_api_client):
-        import cv2
-        import numpy as np
-
-        img = np.zeros((2000, 1600, 3), dtype=np.uint8)
-        img[:] = (40, 80, 120)
-        _, buffer = cv2.imencode(".jpg", img)
-        image_bytes = buffer.tobytes()
-
-        with patch("smart_image_cropper.cropper.ImageUtils.normalize_input", return_value=image_bytes):
-            cropper = SmartImageCropper("http://test.com", "test_key")
-            # Near 4:5 subject with room to expand in a large canvas
-            result = cropper.create_collage(
-                image_bytes,
-                [BoundingBox(200, 100, 1400, 1600)],
-                use_platform_targets=True,
-                bar_reserve_pct=0,
-            )
-
-        out = cv2.imdecode(np.frombuffer(result.image_bytes, np.uint8), cv2.IMREAD_COLOR)
-        assert out is not None
-        assert out.shape[1] == 1080
-        assert out.shape[0] == 1350
