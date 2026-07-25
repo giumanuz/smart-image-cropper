@@ -34,6 +34,29 @@ class AspectRatio(Enum):
         return self.value[0] / self.value[1]
 
 
+@dataclass(frozen=True)
+class PlatformTarget:
+    """Final social post canvas size."""
+
+    width: int
+    height: int
+    name: str = ""
+
+    @property
+    def ratio(self) -> float:
+        return self.width / self.height
+
+    def photo_size(self, bar_reserve_pct: float = 0.0) -> Tuple[int, int]:
+        """Return photo area size after reserving space for a bottom bar."""
+        reserve = max(0.0, min(float(bar_reserve_pct), 90.0)) / 100.0
+        photo_height = max(1, int(round(self.height * (1.0 - reserve))))
+        return self.width, photo_height
+
+
+PLATFORM_HORIZONTAL = PlatformTarget(1200, 630, "horizontal")
+PLATFORM_VERTICAL = PlatformTarget(1080, 1350, "vertical")
+
+
 class CollageDirection(Enum):
     """Directions for the collage."""
 
@@ -116,6 +139,25 @@ class AspectRatioCalculator:
         return closest_ratio
 
     @staticmethod
+    def select_platform_target(content_ratio: float) -> PlatformTarget:
+        """Pick horizontal (1200x630) or vertical (1080x1350) from content ratio."""
+        horizontal_diff = abs(content_ratio - PLATFORM_HORIZONTAL.ratio)
+        vertical_diff = abs(content_ratio - PLATFORM_VERTICAL.ratio)
+        selected = (
+            PLATFORM_HORIZONTAL
+            if horizontal_diff <= vertical_diff
+            else PLATFORM_VERTICAL
+        )
+        logger.info(
+            "Content ratio %.3f → platform %s (%dx%d)",
+            content_ratio,
+            selected.name,
+            selected.width,
+            selected.height,
+        )
+        return selected
+
+    @staticmethod
     def needs_expansion(
         current_ratio: float, target_ratio: float, tolerance: float = 0.05
     ) -> bool:
@@ -181,28 +223,30 @@ class BoundingBoxExpander:
         return BoundingBox(bbox.x1, new_y1, bbox.x2, new_y2)
 
     @staticmethod
-    def expand_to_aspect_ratio(
-        img: np.ndarray, bbox: BoundingBox, target_ratio: AspectRatio
+    def expand_to_ratio(
+        img: np.ndarray, bbox: BoundingBox, target_ratio: float
     ) -> BoundingBox:
-        """Expand a bbox to reach the target format."""
+        """Expand a bbox proportionally to approach a target aspect ratio."""
         current_ratio = bbox.aspect_ratio
-        target_ratio_value = target_ratio.ratio
 
         logger.info(
-            f"Expanding bbox from {bbox.width}x{bbox.height} (ratio: {current_ratio:.3f}) to target ratio {target_ratio.value[0]}:{target_ratio.value[1]} ({target_ratio_value:.3f})"
+            "Expanding bbox from %dx%d (ratio: %.3f) to target ratio %.3f",
+            bbox.width,
+            bbox.height,
+            current_ratio,
+            target_ratio,
         )
 
-        if not AspectRatioCalculator.needs_expansion(current_ratio, target_ratio_value):
-            logger.info(
-                "Bbox already has correct aspect ratio, no expansion needed")
+        if not AspectRatioCalculator.needs_expansion(current_ratio, target_ratio):
+            logger.info("Bbox already has correct aspect ratio, no expansion needed")
             return bbox
 
         expanded_bbox = bbox
         img_height, img_width = img.shape[:2]
 
-        if current_ratio < target_ratio_value:
+        if current_ratio < target_ratio:
             # Too tall, expand width
-            ideal_width = int(bbox.height * target_ratio_value)
+            ideal_width = int(bbox.height * target_ratio)
             target_width = min(img_width, ideal_width)
 
             if target_width > bbox.width:
@@ -212,7 +256,7 @@ class BoundingBoxExpander:
                 logger.info(f"Expanded width to {expanded_bbox.width}")
         else:
             # Too wide, expand height
-            ideal_height = int(bbox.width / target_ratio_value)
+            ideal_height = int(bbox.width / target_ratio)
             target_height = min(img_height, ideal_height)
 
             if target_height > bbox.height:
@@ -223,17 +267,80 @@ class BoundingBoxExpander:
 
         final_ratio = expanded_bbox.aspect_ratio
         logger.info(
-            f"Final bbox: {expanded_bbox.width}x{expanded_bbox.height}, ratio: {final_ratio:.3f}"
+            "Final bbox after expand: %dx%d, ratio: %.3f",
+            expanded_bbox.width,
+            expanded_bbox.height,
+            final_ratio,
         )
 
         if AspectRatioCalculator.needs_expansion(
-            final_ratio, target_ratio_value, tolerance=0.05
+            final_ratio, target_ratio, tolerance=0.05
         ):
-            logger.warning(
-                f"Could not reach target ratio {target_ratio_value:.3f}, achieved {final_ratio:.3f}"
+            logger.info(
+                "Expand incomplete (%.3f vs %.3f) — clamping to largest rect with target ratio",
+                final_ratio,
+                target_ratio,
+            )
+            expanded_bbox = BoundingBoxExpander.clamp_to_ratio(
+                expanded_bbox, target_ratio
             )
 
         return expanded_bbox
+
+    @staticmethod
+    def clamp_to_ratio(bbox: BoundingBox, target_ratio: float) -> BoundingBox:
+        """Largest centered sub-rect of bbox with the exact target aspect ratio.
+
+        Used when image borders block further expansion: keep max area, force ratio.
+        """
+        if bbox.width <= 0 or bbox.height <= 0:
+            return bbox
+
+        current_ratio = bbox.aspect_ratio
+        if not AspectRatioCalculator.needs_expansion(
+            current_ratio, target_ratio, tolerance=0.001
+        ):
+            return bbox
+
+        if current_ratio > target_ratio:
+            # Too wide → shrink width
+            new_width = max(1, int(round(bbox.height * target_ratio)))
+            new_height = bbox.height
+            if new_width > bbox.width:
+                new_width = bbox.width
+                new_height = max(1, int(round(new_width / target_ratio)))
+        else:
+            # Too tall → shrink height
+            new_height = max(1, int(round(bbox.width / target_ratio)))
+            new_width = bbox.width
+            if new_height > bbox.height:
+                new_height = bbox.height
+                new_width = max(1, int(round(new_height * target_ratio)))
+
+        new_width = min(new_width, bbox.width)
+        new_height = min(new_height, bbox.height)
+        offset_x = (bbox.width - new_width) // 2
+        offset_y = (bbox.height - new_height) // 2
+        clamped = BoundingBox(
+            bbox.x1 + offset_x,
+            bbox.y1 + offset_y,
+            bbox.x1 + offset_x + new_width,
+            bbox.y1 + offset_y + new_height,
+        )
+        logger.info(
+            "Clamped bbox to %dx%d (ratio: %.3f)",
+            clamped.width,
+            clamped.height,
+            clamped.aspect_ratio,
+        )
+        return clamped
+
+    @staticmethod
+    def expand_to_aspect_ratio(
+        img: np.ndarray, bbox: BoundingBox, target_ratio: AspectRatio
+    ) -> BoundingBox:
+        """Expand a bbox to reach the target format enum."""
+        return BoundingBoxExpander.expand_to_ratio(img, bbox, target_ratio.ratio)
 
 
 class ImageCropper:
@@ -266,6 +373,103 @@ class ImageCropper:
         except Exception as e:
             logger.error(f"Error cropping image: {str(e)}")
             raise ImageProcessingError(f"Error cropping image: {str(e)}")
+
+    @staticmethod
+    def maybe_resize_to_size(
+        result: CropResult,
+        target_width: int,
+        target_height: int,
+        tolerance: float = 0.05,
+    ) -> CropResult:
+        """Center-crop to target ratio if needed, then always resize to platform size.
+
+        If expansion could not fill the ratio, takes the largest centered crop that
+        matches the desired proportions, then scales to the exact pixel size.
+        """
+        nparr = np.frombuffer(result.image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return result
+
+        height, width = img.shape[:2]
+        if width <= 0 or height <= 0:
+            return result
+
+        target_ratio = target_width / target_height
+        current_ratio = width / height
+
+        crop_x, crop_y = 0, 0
+        crop_w, crop_h = width, height
+
+        if AspectRatioCalculator.needs_expansion(
+            current_ratio, target_ratio, tolerance=tolerance
+        ):
+            if current_ratio > target_ratio:
+                crop_w = max(1, int(round(height * target_ratio)))
+                crop_h = height
+            else:
+                crop_w = width
+                crop_h = max(1, int(round(width / target_ratio)))
+
+            crop_w = min(crop_w, width)
+            crop_h = min(crop_h, height)
+            crop_x = (width - crop_w) // 2
+            crop_y = (height - crop_h) // 2
+            img = img[crop_y: crop_y + crop_h, crop_x: crop_x + crop_w]
+            width, height = crop_w, crop_h
+            logger.info(
+                "Took max centered crop %dx%d to match ratio %.3f",
+                width,
+                height,
+                target_ratio,
+            )
+
+        if width == target_width and height == target_height:
+            if crop_x == 0 and crop_y == 0:
+                return result
+            _, buffer = cv2.imencode(".jpg", img)
+            adjusted_coordinates = [
+                ImageCoordinates(
+                    x=max(0, int(round(coord.x - crop_x))),
+                    y=max(0, int(round(coord.y - crop_y))),
+                    width=int(coord.width),
+                    height=int(coord.height),
+                    original_bbox=coord.original_bbox,
+                )
+                for coord in result.coordinates
+            ]
+            return CropResult(
+                image_bytes=buffer.tobytes(),
+                coordinates=adjusted_coordinates,
+                is_collage=result.is_collage,
+            )
+
+        resized = cv2.resize(
+            img, (target_width, target_height), interpolation=cv2.INTER_AREA
+        )
+        _, buffer = cv2.imencode(".jpg", resized)
+
+        scale_x = target_width / width
+        scale_y = target_height / height
+        scaled_coordinates = [
+            ImageCoordinates(
+                x=int(round((coord.x - crop_x) * scale_x)),
+                y=int(round((coord.y - crop_y) * scale_y)),
+                width=int(round(coord.width * scale_x)),
+                height=int(round(coord.height * scale_y)),
+                original_bbox=coord.original_bbox,
+            )
+            for coord in result.coordinates
+        ]
+
+        logger.info(
+            "Resized crop to platform photo size %dx%d", target_width, target_height
+        )
+        return CropResult(
+            image_bytes=buffer.tobytes(),
+            coordinates=scaled_coordinates,
+            is_collage=result.is_collage,
+        )
 
 
 class CollageCreator:
@@ -312,7 +516,7 @@ class CollageCreator:
         bbox1: BoundingBox,
         bbox2: BoundingBox,
         direction: CollageDirection,
-        target_ratio: AspectRatio,
+        target_ratio: float,
     ) -> Tuple[BoundingBox, BoundingBox]:
         """Adjust the dimensions to reach the target format."""
         if direction == CollageDirection.VERTICAL:
@@ -327,12 +531,8 @@ class CollageCreator:
             f"Initial collage: {collage_width}x{collage_height} (ratio: {current_ratio:.3f})"
         )
 
-        target_width = int(
-            collage_height * target_ratio.value[0] / target_ratio.value[1]
-        )
-        target_height = int(
-            collage_width * target_ratio.value[1] / target_ratio.value[0]
-        )
+        target_width = int(collage_height * target_ratio)
+        target_height = int(collage_width / target_ratio)
 
         # Choose the adjustment that requires fewer changes
         width_diff = abs(target_width - collage_width)
@@ -398,7 +598,7 @@ class CollageCreator:
         bbox1: BoundingBox,
         bbox2: BoundingBox,
         direction: CollageDirection,
-        target_ratio: AspectRatio,
+        target_ratio: float,
     ) -> CropResult:
         """Create a collage from two bounding boxes."""
         try:
@@ -648,20 +848,42 @@ class SmartImageCropper:
         image_bytes = ImageUtils.normalize_input(image_input)
         return self.api_client.get_bounding_boxes(image_bytes, mode, webhook_url)
 
-    def create_collage(self, image_input: Union[str, bytes, Image.Image], bboxes: List[BoundingBox]) -> CropResult:
+    def create_collage(
+        self,
+        image_input: Union[str, bytes, Image.Image],
+        bboxes: List[BoundingBox],
+        *,
+        use_platform_targets: bool = False,
+        bar_reserve_pct: float = 0.0,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> CropResult:
         """
         Create a collage from an image and its bounding boxes.
 
         Args:
             image_input: Can be a URL string, image bytes, or PIL Image
             bboxes: List of BoundingBox objects to process
+            use_platform_targets: Expand toward 1200x630 / 1080x1350 instead of
+                legacy 4:5/3:4/1:1/4:3 ratios
+            bar_reserve_pct: Percent of final canvas height reserved for a bottom
+                bar (photo area becomes shorter). Only used with platform targets.
+            target_width / target_height: Optional explicit final canvas size.
+                When set, overrides automatic horizontal/vertical selection.
 
         Returns:
             CropResult: The processed image with coordinate information
         """
         image_bytes = ImageUtils.normalize_input(image_input)
         best_bboxes = self._select_best_bboxes(bboxes)
-        return self._process_bboxes(image_bytes, best_bboxes)
+        return self._process_bboxes(
+            image_bytes,
+            best_bboxes,
+            use_platform_targets=use_platform_targets,
+            bar_reserve_pct=bar_reserve_pct,
+            target_width=target_width,
+            target_height=target_height,
+        )
 
     def _select_best_bboxes(self, bboxes: List[BoundingBox]) -> List[BoundingBox]:
         """Select the best bounding boxes for processing."""
@@ -685,12 +907,62 @@ class SmartImageCropper:
 
         return [bbox1, bbox2]
 
-    def _process_bboxes(self, image_bytes: bytes, bboxes: List[BoundingBox]) -> CropResult:
+    def _resolve_photo_target(
+        self,
+        content_ratio: float,
+        *,
+        use_platform_targets: bool,
+        bar_reserve_pct: float,
+        target_width: Optional[int],
+        target_height: Optional[int],
+    ) -> Tuple[float, Optional[Tuple[int, int]]]:
+        """
+        Resolve the photo-area aspect ratio and optional exact resize size.
+
+        Returns:
+            (target_ratio, exact_photo_size_or_None)
+        """
+        if target_width and target_height and target_width > 0 and target_height > 0:
+            platform = PlatformTarget(target_width, target_height, "custom")
+        elif use_platform_targets:
+            platform = AspectRatioCalculator.select_platform_target(content_ratio)
+        else:
+            legacy = AspectRatioCalculator.find_closest_target_ratio(content_ratio)
+            return legacy.ratio, None
+
+        photo_width, photo_height = platform.photo_size(bar_reserve_pct)
+        return photo_width / photo_height, (photo_width, photo_height)
+
+    def _process_bboxes(
+        self,
+        image_bytes: bytes,
+        bboxes: List[BoundingBox],
+        *,
+        use_platform_targets: bool = False,
+        bar_reserve_pct: float = 0.0,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> CropResult:
         """Process the bounding boxes to create the final result."""
         if len(bboxes) == 1:
-            return self._process_single_bbox(image_bytes, bboxes[0])
+            return self._process_single_bbox(
+                image_bytes,
+                bboxes[0],
+                use_platform_targets=use_platform_targets,
+                bar_reserve_pct=bar_reserve_pct,
+                target_width=target_width,
+                target_height=target_height,
+            )
         elif len(bboxes) == 2:
-            return self._process_multiple_bboxes(image_bytes, bboxes[0], bboxes[1])
+            return self._process_multiple_bboxes(
+                image_bytes,
+                bboxes[0],
+                bboxes[1],
+                use_platform_targets=use_platform_targets,
+                bar_reserve_pct=bar_reserve_pct,
+                target_width=target_width,
+                target_height=target_height,
+            )
         else:
             logger.warning(
                 "Unexpected number of bboxes, returning original image")
@@ -701,24 +973,49 @@ class SmartImageCropper:
                 is_collage=False
             )
 
-    def _process_single_bbox(self, image_bytes: bytes, bbox: BoundingBox) -> CropResult:
+    def _process_single_bbox(
+        self,
+        image_bytes: bytes,
+        bbox: BoundingBox,
+        *,
+        use_platform_targets: bool = False,
+        bar_reserve_pct: float = 0.0,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> CropResult:
         """Process a single bounding box."""
         logger.info("Single bbox detected, expanding to target aspect ratio")
 
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        target_ratio = AspectRatioCalculator.find_closest_target_ratio(
-            bbox.aspect_ratio
+        target_ratio, photo_size = self._resolve_photo_target(
+            bbox.aspect_ratio,
+            use_platform_targets=use_platform_targets,
+            bar_reserve_pct=bar_reserve_pct,
+            target_width=target_width,
+            target_height=target_height,
         )
-        expanded_bbox = BoundingBoxExpander.expand_to_aspect_ratio(
+        expanded_bbox = BoundingBoxExpander.expand_to_ratio(
             img, bbox, target_ratio
         )
-
-        return ImageCropper.crop_image(image_bytes, expanded_bbox)
+        result = ImageCropper.crop_image(image_bytes, expanded_bbox)
+        if photo_size:
+            result = ImageCropper.maybe_resize_to_size(
+                result, photo_size[0], photo_size[1]
+            )
+        return result
 
     def _process_multiple_bboxes(
-        self, image_bytes: bytes, bbox1: BoundingBox, bbox2: BoundingBox
+        self,
+        image_bytes: bytes,
+        bbox1: BoundingBox,
+        bbox2: BoundingBox,
+        *,
+        use_platform_targets: bool = False,
+        bar_reserve_pct: float = 0.0,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
     ) -> CropResult:
         """Process two bounding boxes to create a collage."""
         direction = CollageDirectionDecider.decide_direction(bbox1, bbox2)
@@ -733,9 +1030,19 @@ class SmartImageCropper:
             collage_height = max(bbox1.height, bbox2.height)
 
         collage_ratio = collage_width / collage_height
-        target_ratio = AspectRatioCalculator.find_closest_target_ratio(
-            collage_ratio)
+        target_ratio, photo_size = self._resolve_photo_target(
+            collage_ratio,
+            use_platform_targets=use_platform_targets,
+            bar_reserve_pct=bar_reserve_pct,
+            target_width=target_width,
+            target_height=target_height,
+        )
 
-        return CollageCreator.create_collage(
+        result = CollageCreator.create_collage(
             image_bytes, bbox1, bbox2, direction, target_ratio
         )
+        if photo_size:
+            result = ImageCropper.maybe_resize_to_size(
+                result, photo_size[0], photo_size[1]
+            )
+        return result
