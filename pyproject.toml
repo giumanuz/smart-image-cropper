@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-image-cropper"
-version = "1.4.1"
+version = "1.4.5"
 description = "An intelligent image cropping library that creates smart collages"
 readme = "README.md"
 requires-python = ">=3.8"

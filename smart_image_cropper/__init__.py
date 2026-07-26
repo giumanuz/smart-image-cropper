@@ -13,7 +13,7 @@ from .platform import (
     select_platform_target,
 )
 
-__version__ = "1.4.1"
+__version__ = "1.4.5"
 __author__ = "Giulio Manuzzi"
 __email__ = "giuliomanuzzi@gmail.com"
 

@@ -11,7 +11,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="smart-image-cropper",
-    version="1.4.1",
+    version="1.4.5",
     author="Giulio Manuzzi",
     author_email="giuliomanuzzi@gmail.com",
     description="An intelligent image cropping library that creates smart collages",

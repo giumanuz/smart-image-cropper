@@ -114,17 +114,29 @@ class PlatformFitInfo:
 def select_platform_target(
     content_ratio: float,
     platforms: Tuple[PlatformTarget, ...] = _DEFAULT_PLATFORMS,
+    *,
+    horizontal_min_ratio: float = 1.4,
 ) -> PlatformTarget:
-    """Pick the platform whose aspect ratio is closest to the detector crop ratio."""
+    """Default to vertical; horizontal only if content is clearly wide.
+
+    ``horizontal_min_ratio``: use horizontal platform when ratio >= this value.
+    """
     if not platforms:
         raise ValueError("At least one platform target is required")
 
-    selected = min(platforms, key=lambda p: abs(content_ratio - p.ratio))
+    by_name = {p.name: p for p in platforms}
+    if content_ratio >= horizontal_min_ratio and "horizontal" in by_name:
+        selected = by_name["horizontal"]
+    elif "vertical" in by_name:
+        selected = by_name["vertical"]
+    else:
+        selected = min(platforms, key=lambda p: abs(content_ratio - p.ratio))
+
     logger.info(
-        "platform.select content_ratio=%.3f → %s (candidates=%s)",
+        "platform.select content_ratio=%.3f horizontal_min=%.3f → %s",
         content_ratio,
+        horizontal_min_ratio,
         selected,
-        ", ".join(f"{p.name}:{p.ratio:.3f}" for p in platforms),
     )
     return selected
 
@@ -136,6 +148,7 @@ def resolve_photo_target(
     bar_reserve_pct: float = 0.0,
     target_width: Optional[int] = None,
     target_height: Optional[int] = None,
+    horizontal_min_ratio: float = 1.4,
 ) -> Optional[PhotoTarget]:
     """
     Resolve the photo area to crop into.
@@ -145,7 +158,9 @@ def resolve_photo_target(
     if target_width and target_height and target_width > 0 and target_height > 0:
         platform = PlatformTarget(target_width, target_height, "custom")
     elif use_platform_targets:
-        platform = select_platform_target(content_ratio)
+        platform = select_platform_target(
+            content_ratio, horizontal_min_ratio=horizontal_min_ratio
+        )
     else:
         return None
 

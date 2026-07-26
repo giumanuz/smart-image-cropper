@@ -47,6 +47,12 @@ class TestPlatformModule:
     def test_select_horizontal_for_wide(self) -> None:
         assert select_platform_target(1.9) == PLATFORM_HORIZONTAL
 
+    def test_prefer_vertical_unless_clearly_wide(self) -> None:
+        assert select_platform_target(1.0) == PLATFORM_VERTICAL
+        assert select_platform_target(1.186) == PLATFORM_VERTICAL
+        assert select_platform_target(1.4) == PLATFORM_HORIZONTAL
+        assert select_platform_target(1.39) == PLATFORM_VERTICAL
+
     def test_photo_size_with_bar_reserve(self) -> None:
         size = PLATFORM_VERTICAL.photo_size(20)
         assert size == Size(1080, 1080)
@@ -174,6 +180,29 @@ class TestPlatformCollagePipeline:
             result = cropper.create_collage(
                 image_bytes,
                 [BoundingBox(100, 200, 1900, 800)],  # wide
+                use_platform_targets=True,
+                bar_reserve_pct=0,
+            )
+
+        width, height = _decode_size(result.image_bytes)
+        assert (width, height) == (1200, 630)
+        assert result.fit is not None
+        assert result.fit.photo_target.platform == PLATFORM_HORIZONTAL
+
+    def test_clearly_wide_side_by_side_collage_stays_horizontal(
+        self, cropper: SmartImageCropper
+    ) -> None:
+        """Two side-by-side faces (~1.7 rough ratio) are clearly wide → horizontal."""
+        image_bytes = _jpeg_bytes(1280, 627)
+        left = BoundingBox(40, 40, 500, 580)
+        right = BoundingBox(780, 40, 1240, 580)
+        with patch(
+            "smart_image_cropper.cropper.ImageUtils.normalize_input",
+            return_value=image_bytes,
+        ):
+            result = cropper.create_collage(
+                image_bytes,
+                [left, right],
                 use_platform_targets=True,
                 bar_reserve_pct=0,
             )

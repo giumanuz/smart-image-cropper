@@ -203,153 +203,68 @@ class BoundingBoxExpander:
         return BoundingBox(bbox.x1, new_y1, bbox.x2, new_y2)
 
     @staticmethod
-    def _max_size_for_ratio(
-        img_width: int, img_height: int, target_ratio: float
-    ) -> Tuple[int, int]:
-        """Largest (w, h) with aspect target_ratio that fits in the image."""
-        if target_ratio <= 0:
-            return img_width, img_height
-        if img_width / img_height >= target_ratio:
-            height = img_height
-            width = max(1, int(round(height * target_ratio)))
-        else:
-            width = img_width
-            height = max(1, int(round(width / target_ratio)))
-        return min(width, img_width), min(height, img_height)
-
-    @staticmethod
-    def _placement_range(
-        img_width: int,
-        img_height: int,
-        subject: BoundingBox,
-        crop_w: int,
-        crop_h: int,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        """Valid top-left ranges so a crop contains subject and stays in-bounds."""
-        if crop_w < subject.width or crop_h < subject.height:
-            return None
-        if crop_w > img_width or crop_h > img_height:
-            return None
-        x_lo = max(0, subject.x2 - crop_w)
-        x_hi = min(subject.x1, img_width - crop_w)
-        y_lo = max(0, subject.y2 - crop_h)
-        y_hi = min(subject.y1, img_height - crop_h)
-        if x_lo > x_hi or y_lo > y_hi:
-            return None
-        return x_lo, x_hi, y_lo, y_hi
-
-    @staticmethod
     def expand_to_ratio(
         img: np.ndarray, bbox: BoundingBox, target_ratio: float
     ) -> Tuple[BoundingBox, bool]:
-        """Grow bbox to the largest in-image crop at target_ratio that still contains it.
+        """Expand subject to the largest crop at ``target_ratio`` that fits in the image.
 
-        Trusts the platform/photo target: expand as far as the source allows.
-        If the subject cannot fit that ratio inside the image, clamp then expand.
+        Prefer using full image height when the ratio allows (vertical-friendly).
+        Then place the crop so it still contains the subject and resize later
+        to the exact platform pixel size.
         """
         img_height, img_width = img.shape[:2]
         subject = bbox
         clamped = False
 
-        logger.info(
-            "bbox.expand start=%dx%d@%.3f target_ratio=%.3f image=%dx%d",
-            subject.width,
-            subject.height,
-            subject.aspect_ratio,
-            target_ratio,
-            img_width,
-            img_height,
-        )
+        if target_ratio <= 0:
+            return subject, False
 
-        max_w, max_h = BoundingBoxExpander._max_size_for_ratio(
-            img_width, img_height, target_ratio
-        )
+        # Largest rect at target_ratio inside the source (prefer full height).
+        if img_width / img_height >= target_ratio:
+            crop_h = img_height
+            crop_w = max(1, int(round(crop_h * target_ratio)))
+        else:
+            crop_w = img_width
+            crop_h = max(1, int(round(crop_w / target_ratio)))
+        crop_w = min(crop_w, img_width)
+        crop_h = min(crop_h, img_height)
 
-        if subject.width > max_w or subject.height > max_h:
-            logger.info(
-                "bbox.expand subject=%dx%d exceeds max=%dx%d — clamping to ratio",
-                subject.width,
-                subject.height,
-                max_w,
-                max_h,
-            )
+        # Subject too big for that rect → clamp subject, then recompute min crop.
+        if subject.width > crop_w or subject.height > crop_h:
             subject = BoundingBoxExpander.clamp_to_ratio(subject, target_ratio)
             clamped = True
-            if subject.width > max_w or subject.height > max_h:
-                # Still too large after clamp: take the max platform rect on subject center.
-                cx = (subject.x1 + subject.x2) // 2
-                cy = (subject.y1 + subject.y2) // 2
-                x1 = max(0, min(img_width - max_w, cx - max_w // 2))
-                y1 = max(0, min(img_height - max_h, cy - max_h // 2))
-                result = BoundingBox(x1, y1, x1 + max_w, y1 + max_h)
-                logger.info(
-                    "bbox.expand fallback max rect %dx%d@%.3f",
-                    result.width,
-                    result.height,
-                    result.aspect_ratio,
-                )
-                return result, True
+            crop_w = max(crop_w, subject.width)
+            crop_h = max(crop_h, subject.height)
+            if crop_w > img_width or crop_h > img_height:
+                crop_w = min(subject.width, img_width)
+                crop_h = min(subject.height, img_height)
 
-        # Minimum crop height that can cover the subject at target_ratio.
-        if subject.width / max(subject.height, 1) > target_ratio:
-            min_h = max(subject.height, int(math.ceil(subject.width / target_ratio)))
-        else:
-            min_h = subject.height
-        if min_h > max_h or int(round(min_h * target_ratio)) > max_w:
-            logger.info(
-                "bbox.expand min crop for subject exceeds image max — clamping"
-            )
-            subject = BoundingBoxExpander.clamp_to_ratio(bbox, target_ratio)
-            clamped = True
-            min_h = subject.height
+        # Center on subject, then shift to keep subject inside the crop.
+        x = subject.x1 + subject.width // 2 - crop_w // 2
+        y = subject.y1 + subject.height // 2 - crop_h // 2
+        x = max(0, min(x, img_width - crop_w))
+        y = max(0, min(y, img_height - crop_h))
+        if subject.x1 < x:
+            x = subject.x1
+        if subject.y1 < y:
+            y = subject.y1
+        if subject.x2 > x + crop_w:
+            x = subject.x2 - crop_w
+        if subject.y2 > y + crop_h:
+            y = subject.y2 - crop_h
+        x = max(0, min(x, img_width - crop_w))
+        y = max(0, min(y, img_height - crop_h))
 
-        # Binary search largest height at target_ratio that can contain subject.
-        best: Optional[Tuple[int, int, int, int, int, int]] = None
-        lo, hi = max(1, min_h), max_h
-        while lo <= hi:
-            mid_h = (lo + hi) // 2
-            mid_w = max(1, int(round(mid_h * target_ratio)))
-            if mid_w > max_w:
-                mid_w = max_w
-                mid_h = max(1, int(round(mid_w / target_ratio)))
-
-            if mid_w < subject.width or mid_h < subject.height:
-                # Crop still too small to cover the subject — grow.
-                lo = max(lo + 1, mid_h + 1)
-                continue
-
-            ranges = BoundingBoxExpander._placement_range(
-                img_width, img_height, subject, mid_w, mid_h
-            )
-            if ranges is not None:
-                x_lo, x_hi, y_lo, y_hi = ranges
-                best = (mid_w, mid_h, x_lo, x_hi, y_lo, y_hi)
-                lo = mid_h + 1
-            else:
-                # Fits subject size but cannot be placed in-bounds — shrink.
-                hi = mid_h - 1
-
-        if best is None:
-            # Should be rare after clamp; fall back to previous clamp-on-bbox behavior.
-            logger.info(
-                "bbox.expand no feasible max crop — clamping subject to ratio"
-            )
-            return BoundingBoxExpander.clamp_to_ratio(bbox, target_ratio), True
-
-        crop_w, crop_h, x_lo, x_hi, y_lo, y_hi = best
-        pref_x = subject.x1 + subject.width // 2 - crop_w // 2
-        pref_y = subject.y1 + subject.height // 2 - crop_h // 2
-        x1 = max(x_lo, min(x_hi, pref_x))
-        y1 = max(y_lo, min(y_hi, pref_y))
-        expanded = BoundingBox(x1, y1, x1 + crop_w, y1 + crop_h)
-
+        expanded = BoundingBox(x, y, x + crop_w, y + crop_h)
         logger.info(
-            "bbox.expand done=%dx%d@%.3f (max_possible=%dx%d, clamped=%s)",
+            "bbox.expand %dx%d@%.3f → %dx%d@%.3f (target_ratio=%.3f clamped=%s)",
+            bbox.width,
+            bbox.height,
+            bbox.aspect_ratio,
             expanded.width,
             expanded.height,
             expanded.aspect_ratio,
-            max_w,
-            max_h,
+            target_ratio,
             clamped,
         )
         return expanded, clamped
