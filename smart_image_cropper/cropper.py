@@ -206,44 +206,33 @@ class BoundingBoxExpander:
     def expand_to_ratio(
         img: np.ndarray, bbox: BoundingBox, target_ratio: float
     ) -> Tuple[BoundingBox, bool]:
-        """Expand subject to the largest crop at ``target_ratio`` that fits in the image.
+        """Largest crop at target_ratio that still contains the subject.
 
-        Prefer using full image height when the ratio allows (vertical-friendly).
-        Then place the crop so it still contains the subject and resize later
-        to the exact platform pixel size.
+        Prefer full source height when the ratio allows, center on subject,
+        clamp only if the subject itself is larger than that crop.
         """
-        img_height, img_width = img.shape[:2]
-        subject = bbox
-        clamped = False
-
+        img_h, img_w = img.shape[:2]
         if target_ratio <= 0:
-            return subject, False
+            return bbox, False
 
-        # Largest rect at target_ratio inside the source (prefer full height).
-        if img_width / img_height >= target_ratio:
-            crop_h = img_height
-            crop_w = max(1, int(round(crop_h * target_ratio)))
+        # Biggest rectangle of this ratio inside the image.
+        if img_w / img_h >= target_ratio:
+            crop_h, crop_w = img_h, max(1, int(round(img_h * target_ratio)))
         else:
-            crop_w = img_width
-            crop_h = max(1, int(round(crop_w / target_ratio)))
-        crop_w = min(crop_w, img_width)
-        crop_h = min(crop_h, img_height)
+            crop_w, crop_h = img_w, max(1, int(round(img_w / target_ratio)))
 
-        # Subject too big for that rect → clamp subject, then recompute min crop.
+        clamped = False
+        subject = bbox
         if subject.width > crop_w or subject.height > crop_h:
             subject = BoundingBoxExpander.clamp_to_ratio(subject, target_ratio)
             clamped = True
-            crop_w = max(crop_w, subject.width)
-            crop_h = max(crop_h, subject.height)
-            if crop_w > img_width or crop_h > img_height:
-                crop_w = min(subject.width, img_width)
-                crop_h = min(subject.height, img_height)
+            crop_w = min(img_w, max(crop_w, subject.width))
+            crop_h = min(img_h, max(crop_h, subject.height))
 
-        # Center on subject, then shift to keep subject inside the crop.
         x = subject.x1 + subject.width // 2 - crop_w // 2
         y = subject.y1 + subject.height // 2 - crop_h // 2
-        x = max(0, min(x, img_width - crop_w))
-        y = max(0, min(y, img_height - crop_h))
+        x = max(0, min(x, img_w - crop_w))
+        y = max(0, min(y, img_h - crop_h))
         if subject.x1 < x:
             x = subject.x1
         if subject.y1 < y:
@@ -252,18 +241,16 @@ class BoundingBoxExpander:
             x = subject.x2 - crop_w
         if subject.y2 > y + crop_h:
             y = subject.y2 - crop_h
-        x = max(0, min(x, img_width - crop_w))
-        y = max(0, min(y, img_height - crop_h))
+        x = max(0, min(x, img_w - crop_w))
+        y = max(0, min(y, img_h - crop_h))
 
         expanded = BoundingBox(x, y, x + crop_w, y + crop_h)
         logger.info(
-            "bbox.expand %dx%d@%.3f → %dx%d@%.3f (target_ratio=%.3f clamped=%s)",
+            "bbox.expand %dx%d → %dx%d (ratio=%.3f clamped=%s)",
             bbox.width,
             bbox.height,
-            bbox.aspect_ratio,
             expanded.width,
             expanded.height,
-            expanded.aspect_ratio,
             target_ratio,
             clamped,
         )
@@ -367,7 +354,7 @@ class ImageCropper:
         photo_target: Optional[PhotoTarget] = None,
         clamped_bbox: bool = False,
     ) -> CropResult:
-        """Center-crop to target ratio if needed, then always resize to platform size."""
+        """Scale crop to exact platform photo pixels (ratio already set by expand)."""
         nparr = np.frombuffer(result.image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
@@ -379,58 +366,37 @@ class ImageCropper:
             return result
 
         input_size = Size(width, height)
-        target_ratio = target_width / target_height
-        current_ratio = width / height
+        if width == target_width and height == target_height:
+            if photo_target is not None:
+                result.fit = PlatformFitInfo(
+                    photo_target=photo_target,
+                    input_size=input_size,
+                    output_size=input_size,
+                    clamped_bbox=clamped_bbox,
+                    center_cropped=False,
+                    resized=False,
+                )
+            return result
 
-        crop_x, crop_y = 0, 0
-        crop_w, crop_h = width, height
-        center_cropped = False
-
-        if AspectRatioCalculator.needs_expansion(
-            current_ratio, target_ratio, tolerance=tolerance
-        ):
-            if current_ratio > target_ratio:
-                crop_w = max(1, int(round(height * target_ratio)))
-                crop_h = height
-            else:
-                crop_w = width
-                crop_h = max(1, int(round(width / target_ratio)))
-
-            crop_w = min(crop_w, width)
-            crop_h = min(crop_h, height)
-            crop_x = (width - crop_w) // 2
-            crop_y = (height - crop_h) // 2
-            img = img[crop_y: crop_y + crop_h, crop_x: crop_x + crop_w]
-            width, height = crop_w, crop_h
-            center_cropped = True
-            logger.info(
-                "platform.fit center_crop %s → %dx%d for ratio=%.3f",
-                input_size,
-                width,
-                height,
-                target_ratio,
-            )
-
-        resized = width != target_width or height != target_height
-        if resized:
-            img = cv2.resize(
-                img, (target_width, target_height), interpolation=cv2.INTER_AREA
-            )
-            logger.info(
-                "platform.fit resize %dx%d → %dx%d",
-                width,
-                height,
-                target_width,
-                target_height,
-            )
+        # Expand already matched aspect; only scale to platform pixels.
+        img = cv2.resize(
+            img, (target_width, target_height), interpolation=cv2.INTER_AREA
+        )
+        logger.info(
+            "platform.fit scale %dx%d → %dx%d",
+            width,
+            height,
+            target_width,
+            target_height,
+        )
 
         _, buffer = cv2.imencode(".jpg", img)
         scale_x = target_width / width
         scale_y = target_height / height
         scaled_coordinates = [
             ImageCoordinates(
-                x=int(round((coord.x - crop_x) * scale_x)),
-                y=int(round((coord.y - crop_y) * scale_y)),
+                x=int(round(coord.x * scale_x)),
+                y=int(round(coord.y * scale_y)),
                 width=int(round(coord.width * scale_x)),
                 height=int(round(coord.height * scale_y)),
                 original_bbox=coord.original_bbox,
@@ -446,8 +412,8 @@ class ImageCropper:
                 input_size=input_size,
                 output_size=output_size,
                 clamped_bbox=clamped_bbox,
-                center_cropped=center_cropped,
-                resized=resized,
+                center_cropped=False,
+                resized=True,
             )
             logger.info("platform.fit done %s", fit.summary())
 
